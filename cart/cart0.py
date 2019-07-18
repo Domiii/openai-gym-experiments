@@ -1,8 +1,13 @@
+# This agent uses a stupid random weights algorithm, and keeps rolling the dice until it wins
+
 # see: https://github.com/openai/gym/wiki/CartPole-v0
 # Tutorial: https://www.youtube.com/watch?v=ZipAjLSNlQc&list=PL-9x0_FO_lglnlYextpvu39E7vWzHhtNO
 
 # NOTE: we need to stay in the air for at least 195 steps in 100 consecutive trials to beat this challenge!
 
+import time
+#import asyncio
+from matplotlib import pyplot as plt
 from time import perf_counter
 from os.path import dirname, abspath, basename, splitext
 import sys
@@ -13,7 +18,6 @@ from gym import wrappers
 ##########################################################################################
 # Configuration
 ##########################################################################################
-splitext
 maxScore = 200 # defined by the environment
 nPolicies = 100 # how many different policies do we want to try?
 nTrials = 100 # how many episodes (aka trial) to run for each policy?
@@ -24,7 +28,7 @@ envName = 'CartPole-v0'
 # Run simulation with given policy
 ##########################################################################################
 
-def runOnce(weights):
+def runOnce(env, weights):
   observation = env.reset()
   done = False
   iStep = 0
@@ -41,8 +45,7 @@ def runOnce(weights):
     observation, reward, done, info = env.step(action)
     score += reward
   
-  endTime = perf_counter() - startTime
-  elapsed = endTime - startTime
+  elapsed = perf_counter() - startTime
 
   return score, elapsed
 
@@ -51,7 +54,7 @@ def runOnce(weights):
 # Do the whole thing
 ##########################################################################################
 
-print('starting policy evaluation...')
+print('starting...')
 
 # setup
 env = gym.make(envName)
@@ -68,7 +71,7 @@ for iPolicy in range(nPolicies):
 
   # run trial (each trial runs the simulation once)
   for iTrial in range(nTrials):
-    score, elapsed = runOnce(weights)
+    score, elapsed = runOnce(env, weights)
     trialScores.append(score)
     times.append(elapsed)
 
@@ -89,18 +92,44 @@ for iPolicy in range(nPolicies):
       break
 
 
+
 ##########################################################################################
 # Wrap things up
 ##########################################################################################
 
 print('finished!')
 
-# now, record the best run to file!
-cwd = dirname(abspath('.'))
-fpath = sys.argv[0]
 
-# cwd = abspath('.')
-fpath = __file__
-fname = splitext(basename(fpath))[0] # name of current .py file (without .py extension)
-env = wrappers.Monitor(env, f'_results/{fname}', force=True)
-runOnce(bestWeights)
+def plotResults():
+    # plot run-times
+  fig, ax = plt.subplots()
+
+  # see: https://matplotlib.org/3.1.1/gallery/statistics/boxplot_demo.html
+  bp = ax.boxplot(allTimes, notch=1)
+
+  plt.title('run times')
+  plt.xlabel('policies')
+  plt.ylabel('ms')
+
+  plt.setp(bp['whiskers'], color='k', linestyle='-')
+  plt.setp(bp['fliers'], markersize=3.0)
+
+  # xs = range(nPolicies)
+  plt.show()
+
+
+def saveResultsToFile(env):
+  # now, record the best run to file!
+  cwd = dirname(abspath('.'))
+  fpath = sys.argv[0]
+
+  # cwd = abspath('.')
+  fpath = __file__
+  # name of current .py file (without .py extension)
+  fname = splitext(basename(fpath))[0]
+  env = wrappers.Monitor(env, f'_results/{fname}', force=True)
+  runOnce(env, bestWeights)
+
+
+saveResultsToFile(env)
+#plotResults()
