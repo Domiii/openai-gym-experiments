@@ -29,31 +29,39 @@ actionSpace = (0, 1)
 # parameters we can play with
 goodConfigs = [
   {
-    'nIterations': 1000,  # how long do we want to train for?
-    'stateResolution': 4,  # amount of bins for each state variable
+    'nIterations': 50,  # how long do we want to train for?
+    'stateResolution': 12,  # amount of bins for each state variable
+    'alpha': 0.1,
+    'gamma': 0.95
+  },
+  {
+    'nIterations': 50,  # how long do we want to train for?
+    'stateResolution': 10,  # amount of bins for each state variable
     'alpha': 0.01,
     'gamma': 0.9
   },
   {
-    'nIterations': 100,  # how long do we want to train for?
+    'nIterations': 50,  # how long do we want to train for?
     'stateResolution': 6,  # amount of bins for each state variable
-    'alpha': 0.01,
+    'alpha': 0.05,
     'gamma': 0.9
   },
   {
+    # this one is not so good?
     'nIterations': 200,  # how long do we want to train for?
     'stateResolution': 6,  # amount of bins for each state variable
     'alpha': 0.1,
     'gamma': 0.99
   },
+    # this one is not so good?
   {
-    'nIterations': 100,  # how long do we want to train for?
-    'stateResolution': 10,  # amount of bins for each state variable
+    'nIterations': 300,  # how long do we want to train for?
+    'stateResolution': 4,  # amount of bins for each state variable
     'alpha': 0.01,
     'gamma': 0.9
   }
 ]
-configIndex = 2
+configIndex = 1
 
 
 config = goodConfigs[configIndex]
@@ -64,7 +72,7 @@ alpha = config['alpha']
 gamma = config['gamma']
 
 nLogSteps = nIterations/20 * 100
-deathValue = -100
+deathValue = -10
 
 
 # epsilon is the probability to favor exploration over exploitation
@@ -169,6 +177,13 @@ class Q:
   def stepRandom(self):
     # pick an action at random
     action = np.random.choice(self.actionSpace)
+
+    # add-on for certain state spaces: don't even try a really shitty move
+    iTries = 3
+    while self.q[self.lastStateIndex + action] <= deathValue * 0.5 and iTries > 0:
+      action = np.random.choice(self.actionSpace)
+      iTries -= 1
+
     results = self.stepAction(action)
     return results
     
@@ -246,8 +261,9 @@ def runOnce(q, eps):
 '''
 TODO:
 1. multithreading and cleaner code for plotting and other debugging stuff
-2. add semi-automated parameter tuning
-3. improve epsilon:
+2. add semi-automated parameter tuning?
+3. Record final result to video?
+4. improve epsilon:
   -> maybe for later? actually do research on better epsilon functions!
   -> consider current maturity of trained results instead of nIterations?
   -> restart if not found within given amount of rounds?
@@ -271,11 +287,10 @@ lines = [
 axs[1].set_ylim([0, maxScore])
 scores = []
 randoms = []
-times = []
 plt.ion()
 plt.show(block=False)
 
-def drawResults(i):
+def drawResults():
   #print(f'runOnce, score: {score}, rand: {nRandom/q.nSteps}')
   # re-draw it!
   Qs = np.c_[xs, q.q]
@@ -289,7 +304,9 @@ def drawResults(i):
   axs[0].update_datalim(qShape.get_datalim(axs[0].transData))
   axs[0].autoscale_view()
 
-  axs[1].set_xlim([0, i+1])
+  n = len(scores)
+  axs[1].set_xlim([0, n])
+  times = range(n)
   lines[0].set_data(times, scores)
   lines[1].set_data(times, randoms)
 
@@ -304,21 +321,20 @@ def runN(q, n):
   for i in range(n):
     eps = epsilon(i)
     score, nRandom = runOnce(q, eps)
-    # scores.append(q.nSteps)
-    # randoms.append(nRandom)
-    # times.append(i)
+    scores.append(q.nSteps)
+    randoms.append(nRandom)
 
     # make sure, shit's still ok
     q.doSanityChecks()
 
     # show some stuff
     if i % nLogSteps == 0:
-      drawResults(i)
+      drawResults()
       pass
 
     if q.hasFinished():
         # done!
-      drawResults(i)
+      drawResults()
       break
 
   elapsed = perf_counter() - startTime
