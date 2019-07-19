@@ -131,5 +131,5 @@ def saveResultsToFile(env):
   runOnce(env, bestWeights)
 
 
-saveResultsToFile(env)
-#plotResults()
+#saveResultsToFile(env)
+plotResults()
