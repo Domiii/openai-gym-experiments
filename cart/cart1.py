@@ -1,15 +1,17 @@
 # basic Q-Learning implementation
 
-import time
-from matplotlib import pyplot as plt
-from time import perf_counter
-from os.path import dirname, abspath, basename, splitext
 import sys
 import gym
 import numpy as np
+from matplotlib import pyplot as plt
+from time import perf_counter, sleep
+from os.path import dirname, abspath, basename, splitext
 from gym import wrappers
 from functools import reduce
-
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import Manager, JoinableQueue, Pipe
+import multiprocessing, logging, traceback
+from collections.abc import Iterable
 
 ##########################################################################################
 # Configuration
@@ -31,11 +33,11 @@ goodConfigs = [
   {
     'nIterations': 50,  # how long do we want to train for?
     'stateResolution': 12,  # amount of bins for each state variable
-    'alpha': 0.1,
+    'alpha': 0.01,
     'gamma': 0.95
   },
   {
-    'nIterations': 50,  # how long do we want to train for?
+    'nIterations': 100,  # how long do we want to train for?
     'stateResolution': 10,  # amount of bins for each state variable
     'alpha': 0.01,
     'gamma': 0.9
@@ -71,16 +73,18 @@ stateResolution = config['stateResolution']
 alpha = config['alpha']
 gamma = config['gamma']
 
-nLogSteps = nIterations/20 * 100
+nLogSteps = nIterations
 deathValue = -10
 
+stateSpaceSize = stateResolution ** len(stateSpace) * len(actionSpace)
 
 # epsilon is the probability to favor exploration over exploitation
 # (meaning: take random instead of "good" step)
 def epsilon(iRun):
   return (1 - (iRun/nIterations))**2
 
-
+def hasFinished(q):
+  return q.nSteps >= maxScore
 
 
 ##########################################################################################
@@ -93,6 +97,7 @@ def epsilon(iRun):
 MinFloat = np.finfo('float32').min
 class Q:
   def __init__(self, env, alpha, gamma, stateSpace, actionSpace, initialQ = 0):
+    self.hasFinished = False
     self.env = env
     self.alpha = alpha
     self.gamma = gamma
@@ -111,9 +116,6 @@ class Q:
     actionSize = len(actionSpace)
     qLen = stateSize * actionSize
     self.q = np.zeros(qLen) + initialQ
-
-  def hasFinished(self):
-    return self.nSteps >= maxScore
 
   def reset(self):
     observation = self.env.reset()
@@ -189,9 +191,9 @@ class Q:
     
 
   def step(self):
-    action = self.getMaxAction(self.lastStateIndex)
+    #action = self.getMaxAction(self.lastStateIndex)
     # go with the action we already determined to be optimal last step
-    # action = self.nextAction
+    action = self.nextAction
     return self.stepAction(action)
 
 
@@ -219,6 +221,9 @@ class Q:
       #print(f'{iState+action} -> {nextIState + nextAction}')
 
       q[iState + action] = (1-alpha) * oldQ + (alpha) * newVal
+
+    if done and hasFinished(self):
+      self.hasFinished = True
 
     return reward, done
 
@@ -253,14 +258,15 @@ def runOnce(q, eps):
     else:
       reward, done = q.step()
 
-    score += reward
+    score = iStep
 
   return score, nRandom
 
 
 '''
 TODO:
-1. multithreading and cleaner code for plotting and other debugging stuff
+0. Clean up plotting code
+1. add ThreadPoolExecutor: https://docs.python.org/dev/library/concurrent.futures.html#threadpoolexecutor
 2. add semi-automated parameter tuning?
 3. Record final result to video?
 4. improve epsilon:
@@ -269,22 +275,20 @@ TODO:
   -> restart if not found within given amount of rounds?
 '''
 
-env = gym.make(envName)
-q = Q(env, alpha, gamma, stateSpace, actionSpace)
 
 # setup plot
 fig, axs = plt.subplots(2, 1, constrained_layout=True)
 
 # draw it once
 # animated scatter plot link: https://stackoverflow.com/questions/43674917/animation-in-matplotlib-with-scatter-and-using-set-offsets-autoscale-of-figure
-ys = q.q
-xs = np.array(range(len(ys)))
+ys = [0] * stateSpaceSize
+xs = np.array(range(stateSpaceSize))
 qShape = axs[0].scatter(xs, ys, s=1)
 lines = [
     axs[1].plot([1], [0])[0],
     axs[1].plot([1], [0])[0]
 ]
-axs[1].set_ylim([0, maxScore])
+axs[1].set_ylim([0, maxScore+1])
 scores = []
 randoms = []
 plt.ion()
@@ -292,12 +296,6 @@ plt.show(block=False)
 
 def drawResults():
   #print(f'runOnce, score: {score}, rand: {nRandom/q.nSteps}')
-  # re-draw it!
-  Qs = np.c_[xs, q.q]
-  # xs = 0.9 * np.random.rand(512)
-  # ys = 0.9 * np.random.rand(512)
-  # Qs = np.c_[xs, ys]
-  qShape.set_offsets(Qs)
 
   # relim does not work for scatter; see: https://stackoverflow.com/a/51327480
   axs[0].ignore_existing_data_limits = True
@@ -306,6 +304,7 @@ def drawResults():
 
   n = len(scores)
   axs[1].set_xlim([0, n])
+  #axs[1].relim()
   times = range(n)
   lines[0].set_data(times, scores)
   lines[1].set_data(times, randoms)
@@ -314,41 +313,100 @@ def drawResults():
   fig.canvas.flush_events()
   plt.pause(0.0001)
 
+
+def logRun(newScores, newNRandoms, qOffsets):
+  scores.extend(newScores)
+  randoms.extend(newNRandoms)
+  qShape.set_offsets(qOffsets)
+
 # run!
-def runN(q, n):
+def runN(q, n, epsilon):
   totalElapsed = 0
-  startTime = perf_counter()
+  maxScore = 0
+  scores = []
+  nRandoms = []
   for i in range(n):
     eps = epsilon(i)
     score, nRandom = runOnce(q, eps)
-    scores.append(q.nSteps)
-    randoms.append(nRandom)
+    scores.append(score)
+    nRandoms.append(nRandom)
+    maxScore = max(maxScore, score)
 
     # make sure, shit's still ok
     q.doSanityChecks()
 
     # show some stuff
-    if i % nLogSteps == 0:
-      drawResults()
+    if i % nLogSteps == nLogSteps-1:
+      taskQueue.put(drawResults)
       pass
 
-    if q.hasFinished():
-        # done!
-      drawResults()
-      break
-
-  elapsed = perf_counter() - startTime
-  print(f'finished episode, took {elapsed}s')
-  return q.hasFinished()
+    #if q.hasFinished: # done!
+      #break
+  qOffsets = np.c_[xs, q.q]
+  taskQueue.put((logRun, scores, nRandoms, qOffsets), block=False)
+  taskQueue.put(drawResults)
+  return q.hasFinished, n, maxScore
   #plt.pause(3)
 
 
+# trains + learns only (no blocking distractions)
+def run():
+  try:
+    env = gym.make(envName)
+    q = Q(env, alpha, gamma, stateSpace, actionSpace)
+    done = False
+    totalIterations = 0
+    totalElapsed = 0
 
-while not runN(q, nIterations): pass
+    startTime = perf_counter()
 
+    # first, run until terminal state is hit at least once
+    while not done:
+      done, n, maxScore = runN(q, nIterations, epsilon)
+      totalIterations += n
+      print(totalIterations, maxScore)
+
+    elapsed = perf_counter() - startTime
+    totalElapsed += elapsed
+
+    # run a few more times with exploration
+    done, n, maxScore = runN(q, 5 * nIterations, epsilon)
+    totalIterations += n
+
+    # run a few more times without exploration
+    done, n, maxScore = runN(q, nIterations, lambda i: 0)
+    totalIterations += n
+    
+    print(f'finished {totalIterations} iterations, took {totalElapsed:.2f}s, {(totalElapsed/totalIterations*1000):02}ms per iteration')
+  except Exception as e:
+    error(traceback.format_exc())
+
+  taskQueue.close()
+  #taskQueue.join()
+
+
+logger = multiprocessing.log_to_stderr()
+logger.setLevel(logging.WARNING)
+
+def error(msg, *args):
+  return logger.error(msg, *args)
+
+
+# start (in parallel)!
+nCores = max(1, multiprocessing.cpu_count()-1)
+#print(nCores)
+with ProcessPoolExecutor(max_workers=nCores) as workers, Manager() as manager:
+  taskQueue = JoinableQueue()
+  result = workers.submit(run)
+
+  while not result.done():
+    taskArgs = taskQueue.get(block=True)
+    if isinstance(taskArgs, Iterable):
+      task, *args = taskArgs
+      task(*args)
+    else:
+      taskArgs()
+
+#run()
 print('Done!')
-
-plt.pause(3)
-
-#input('Press ENTER to exit...')
-
+sleep(2)
