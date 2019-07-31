@@ -10,60 +10,40 @@ from gym import wrappers
 from functools import reduce
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import Manager, JoinableQueue, Pipe
-import multiprocessing, logging, traceback
+import multiprocessing
+import logging
+import traceback
 from collections.abc import Iterable
 
 ##########################################################################################
 # Configuration
 ##########################################################################################
 
-# parameters we know about the environment
-envName = 'CartPole-v0'
-maxScore = 200
+# parameters we know about the environment:
+# https://github.com/openai/gym/wiki/MountainCar-v0
+# https://github.com/openai/gym/tree/master/gym/envs/classic_control/mountain_car.py
+envName = 'MountainCar-v0'
+maxSteps = 200
 stateSpace = (
-    (-4.8, 4.8),
-    (-5, 5),
-    (-.418, .418),
-    (-5, 5)
+    (-1.2, 0.6),    # position
+    (-.8, .8)       # velocity
 )
-actionSpace = (0, 1)
+#actionSpace = (0, 1, 2) # left, noop, right
+actionSpace = (0, 2) # left, noop, right
+
+def hasDied(done, nSteps):
+  return done and nSteps >= maxSteps
 
 # parameters we can play with
 goodConfigs = [
-  {
-    'nIterations': 50,  # how long do we want to train for?
-    'stateResolution': 12,  # amount of bins for each state variable
-    'alpha': 0.01,
-    'gamma': 0.95
-  },
-  {
-    'nIterations': 100,  # how long do we want to train for?
-    'stateResolution': 10,  # amount of bins for each state variable
-    'alpha': 0.01,
-    'gamma': 0.9
-  },
-  {
-    'nIterations': 50,  # how long do we want to train for?
-    'stateResolution': 6,  # amount of bins for each state variable
-    'alpha': 0.05,
-    'gamma': 0.9
-  },
-  {
-    # this one is not so good?
-    'nIterations': 200,  # how long do we want to train for?
-    'stateResolution': 6,  # amount of bins for each state variable
-    'alpha': 0.1,
-    'gamma': 0.99
-  },
-    # this one is not so good?
-  {
-    'nIterations': 300,  # how long do we want to train for?
-    'stateResolution': 4,  # amount of bins for each state variable
-    'alpha': 0.01,
-    'gamma': 0.9
-  }
+    {
+        'nIterations': 200,  # how long do we want to train for?
+        'stateResolution': 100,  # amount of bins for each state variable
+        'alpha': 0.01,
+        'gamma': 0.9
+    }
 ]
-configIndex = 1
+configIndex = 0
 
 
 config = goodConfigs[configIndex]
@@ -73,18 +53,18 @@ stateResolution = config['stateResolution']
 alpha = config['alpha']
 gamma = config['gamma']
 
-nLogSteps = nIterations
-deathValue = -10
+#nLogSteps = nIterations
+nLogSteps = 20
+deathValue = -1000
 
 stateSpaceSize = stateResolution ** len(stateSpace) * len(actionSpace)
 
 # epsilon is the probability to favor exploration over exploitation
 # (meaning: take random instead of "good" step)
+
+
 def epsilon(iRun):
   return (1 - (iRun/nIterations))**2
-
-def hasFinished(q):
-  return q.nSteps >= maxScore
 
 
 ##########################################################################################
@@ -95,15 +75,17 @@ def hasFinished(q):
 # This implementation works for small action-state spaces
 # as it does not use a sparse representation.
 MinFloat = np.finfo('float32').min
+
+
 class Q:
-  def __init__(self, env, alpha, gamma, stateSpace, actionSpace, initialQ = 0):
-    self.hasFinished = False
+  def __init__(self, env, alpha, gamma, stateSpace, actionSpace, initialQ=0):
+    self.success = False
     self.env = env
     self.alpha = alpha
     self.gamma = gamma
     self.lastStateIndex = None
     self.nextAction = None
-    
+
     # prepare state space (simplest version: just dense linear spaces)
     stateSpace = self.stateSpace = [
         np.linspace(s[0], s[1], stateResolution) for s in stateSpace
@@ -112,7 +94,8 @@ class Q:
     self.maxActions = [None] * len(actionSpace)
 
     # allocate q vector
-    stateSize = reduce(lambda acc, next: acc*next, (len(s) for s in stateSpace))
+    stateSize = reduce(lambda acc, next: acc*next, (len(s)
+                                                    for s in stateSpace))
     actionSize = len(actionSpace)
     qLen = stateSize * actionSize
     self.q = np.zeros(qLen) + initialQ
@@ -135,8 +118,8 @@ class Q:
       qRes *= len(s)
     return iState
 
-
   # any action that leads to a state of max expected value
+
   def getMaxAction(self, iState):
     # find the max action(s) from that state
     maxActions, nMax = self.getMaxActions(iState)
@@ -155,9 +138,9 @@ class Q:
     #     maxAction = i
     # return maxAction
 
-
   # all actions that lead to the states of max expected value
   # NOTE: There can be multiple.
+
   def getMaxActions(self, iState):
     q = self.q
     maxActions = self.maxActions
@@ -175,7 +158,6 @@ class Q:
         maxActions[nMax-1] = i
     return maxActions, nMax
 
-
   def stepRandom(self):
     # pick an action at random
     action = np.random.choice(self.actionSpace)
@@ -188,7 +170,6 @@ class Q:
 
     results = self.stepAction(action)
     return results
-    
 
   def step(self):
     #action = self.getMaxAction(self.lastStateIndex)
@@ -196,9 +177,12 @@ class Q:
     action = self.nextAction
     return self.stepAction(action)
 
-
   def stepAction(self, action):
     q, alpha, gamma, iState = self.q, self.alpha, self.gamma, self.lastStateIndex
+
+    # render
+    # window_still_open = self.env.render()
+    # if not window_still_open: return deathValue, True
 
     # take step
     observation, reward, done, info = self.env.step(action)
@@ -207,7 +191,7 @@ class Q:
     self.nSteps += 1
 
     # death should be punished hard
-    died = done and self.nSteps < maxScore
+    died = hasDied(done, self.nSteps)
     if died:
       q[iState + action] = reward = deathValue
     else:
@@ -222,19 +206,20 @@ class Q:
 
       q[iState + action] = (1-alpha) * oldQ + (alpha) * newVal
 
-    if done and hasFinished(self):
-      self.hasFinished = True
+    if done and not died:
+      self.success = True
 
     return reward, done
 
   # Make sure, some basic things are still in order
   # E.g.: all numbers are in sane range.
   def doSanityChecks(self):
-    assert all(x >= deathValue for x in self.q), "Q state-action value function has insane values"
-  
+    pass
+    # assert all(
+    #     x >= deathValue for x in self.q), "Q state-action value function has insane values"
+
   def getMetaData(self):
     return self.q
-
 
 
 ##########################################################################################
@@ -258,7 +243,8 @@ def runOnce(q, eps):
     else:
       reward, done = q.step()
 
-    score = iStep
+    score += reward
+    #print(f'stepped {iStep}')
 
   return score, nRandom
 
@@ -285,14 +271,16 @@ ys = [0] * stateSpaceSize
 xs = np.array(range(stateSpaceSize))
 qShape = axs[0].scatter(xs, ys, s=1)
 lines = [
-    axs[1].plot([1], [0])[0],
-    axs[1].plot([1], [0])[0]
+    axs[1].plot([1], [0])[0],   # scores of per run
+    axs[1].plot([1], [0])[0]    # ratio of random moves per run
 ]
-axs[1].set_ylim([0, maxScore+1])
+axs[1].set_ylim([0, 1])
+
 scores = []
 randoms = []
 plt.ion()
 plt.show(block=False)
+
 
 def drawResults():
   #print(f'runOnce, score: {score}, rand: {nRandom/q.nSteps}')
@@ -303,7 +291,7 @@ def drawResults():
   axs[0].autoscale_view()
 
   n = len(scores)
-  axs[1].set_xlim([0, n])
+  axs[1].set_xlim([0, n+1])
   #axs[1].relim()
   times = range(n)
   lines[0].set_data(times, scores)
@@ -311,18 +299,20 @@ def drawResults():
 
   fig.canvas.draw()
   fig.canvas.flush_events()
-  plt.pause(0.0001)
+  plt.pause(0.1)
 
 
 def logRun(newScores, newNRandoms, qOffsets):
-  scores.extend(newScores)
-  randoms.extend(newNRandoms)
+  #scores.extend(newScores)
+  #randoms.extend(newNRandoms[i]/newScores[i] for i in range(len(newNRandoms)))
   qShape.set_offsets(qOffsets)
 
 # run!
+
+
 def runN(q, n, epsilon):
   totalElapsed = 0
-  maxScore = 0
+  maxScore = -1000000
   scores = []
   nRandoms = []
   for i in range(n):
@@ -336,16 +326,16 @@ def runN(q, n, epsilon):
     q.doSanityChecks()
 
     # show some stuff
-    if i % nLogSteps == nLogSteps-1:
-      taskQueue.put(drawResults)
-      pass
+    #if i % nLogSteps == nLogSteps-1:
+      #taskQueue.put(drawResults)
+      #pass
 
-    #if q.hasFinished: # done!
+    #if q.success: # done!
       #break
   qOffsets = np.c_[xs, q.q]
   taskQueue.put((logRun, scores, nRandoms, qOffsets), block=False)
   taskQueue.put(drawResults)
-  return q.hasFinished, n, maxScore
+  return q.success, n, maxScore
   #plt.pause(3)
 
 
@@ -354,31 +344,31 @@ def run():
   try:
     env = gym.make(envName)
     q = Q(env, alpha, gamma, stateSpace, actionSpace)
-    done = False
+    success = False
     totalIterations = 0
     totalElapsed = 0
 
     startTime = perf_counter()
 
     # first, run until terminal state is hit at least once
-    while not done:
-      done, n, maxScore = runN(q, nIterations, epsilon)
+    while not success:
+      success, n, maxScore = runN(q, nIterations, epsilon)
       totalIterations += n
-      print(totalIterations, maxScore)
+      print(f'run #{totalIterations}, maxScore={maxScore}')
 
-    # run a few more times with exploration
-    done, n, maxScore = runN(q, 5 * nIterations, epsilon)
-    totalIterations += n
+    # # run a few more times with exploration
+    # success, n, maxScore = runN(q, 5 * nIterations, epsilon)
+    # totalIterations += n
 
-    # run a few more times without exploration
-    done, n, maxScore = runN(q, nIterations, lambda i: 0)
-    totalIterations += n
+    # # run a few more times without exploration
+    # success, n, maxScore = runN(q, nIterations, lambda i: 0)
+    # totalIterations += n
 
     elapsed = perf_counter() - startTime
     totalElapsed += elapsed
-    
-    print(f'finished {totalIterations} iterations, took {totalElapsed:.2f}s,' +
-      f' {(totalElapsed/totalIterations*1000):02}ms per iteration')
+
+    print(f'finished {totalIterations} iterations, maxScore={maxScore},' +
+      f' took {totalElapsed:.2f}s, {(totalElapsed/totalIterations*1000):02}ms per iteration')
   except Exception as e:
     error(traceback.format_exc())
 
@@ -389,6 +379,7 @@ def run():
 logger = multiprocessing.log_to_stderr()
 logger.setLevel(logging.WARNING)
 
+
 def error(msg, *args):
   return logger.error(msg, *args)
 
@@ -398,16 +389,25 @@ nCores = max(1, multiprocessing.cpu_count()-1)
 #print(nCores)
 with ProcessPoolExecutor(max_workers=nCores) as workers, Manager() as manager:
   taskQueue = JoinableQueue()
-  result = workers.submit(run)
 
+  # run in serial (TODO: plot right away instead of using the taskQueue):
+  # run()
+  # if True:
+
+  # only do one run in parallel
+  result = workers.submit(run)
   while not result.done():
+    
     taskArgs = taskQueue.get(block=True)
     if isinstance(taskArgs, Iterable):
+      # process returned a function with arguments
       task, *args = taskArgs
       task(*args)
-    else:
+    elif taskArgs is not None:
+      # process returned a function without arguments
       taskArgs()
 
 #run()
 print('Done!')
-sleep(2)
+sleep(10)
+
